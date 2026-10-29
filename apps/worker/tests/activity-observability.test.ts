@@ -182,11 +182,13 @@ describe("worker metrics endpoint", () => {
   });
 });
 
-it("registers the activity interceptor on every Temporal worker, including both memory workers", async () => {
+it("registers OTLP wiring on every Temporal worker, including both memory workers", async () => {
   const { readFile } = await import("node:fs/promises");
   for (const entry of ["worker.ts", "memory-maintenance-worker.ts", "memory-mutation-worker.ts"]) {
     const source = await readFile(new URL(`../src/${entry}`, import.meta.url), "utf8");
-    expect(source, entry).toMatch(/interceptors: \{ activity: \[createActivityObservabilityInterceptors\(\{ spans \}\)\] \}/);
+    expect(source, entry).toContain("createWorkerOtlp(");
+    expect(source, entry).toContain("interceptors: otlp.interceptors");
+    expect(source, entry).toContain("otlp.close()");
   }
 });
 
@@ -202,4 +204,41 @@ it("exports one INTERNAL span per activity under the caller's traceparent", asyn
   expect(recorded).toHaveLength(1);
   expect(recorded[0]).toMatchObject({ traceId: "4bf92f3577b34da6a3ce929d0e0e4736", parentSpanId: "00f067aa0ba902b7", name: "activity runTurn",
     kind: 1, error: false, startTimeUnixNano: 1_000_000_000n, endTimeUnixNano: 1_250_000_000n });
+  expect(recorded[0]?.attributes).toEqual({
+    "space.activity_type": "runTurn",
+    "space.outcome": "COMPLETED",
+    "space.attempt": 1,
+    "space.duration_ms": 250,
+    "space.workflow_id": "w",
+    "space.run_id": "r"
+  });
+});
+
+it("exports only allowlisted activity attributes, even when the input holds a prompt and the error holds a path", async () => {
+  const { OTLP_SPAN_ATTRIBUTE_KEYS } = await import("../src/otlp-attributes.js");
+  const recorded: Array<Record<string, unknown>> = [];
+  const spans = { record: (span: Record<string, unknown>) => recorded.push(span), flush: async () => undefined, close: async () => undefined, stats: () => ({ exported: 0, dropped: 0, failed: 0 }) };
+  const secret = "PRIVATE PROMPT sk-live-activity /home/operator/secret.txt https://collector.example/token";
+  const thrown = Object.assign(new Error(secret), { code: "TOOL_UNAVAILABLE" });
+  await expect(observeActivityExecution(info(), [{
+    prompt: secret, traceparent, roomId: "room:alpha01", paneId: "pane:alpha01", missionId: "mission:1",
+    filePath: secret, url: "https://user:secret@example/private"
+  }], async () => { throw thrown; }, { spans: spans as never })).rejects.toBe(thrown);
+  expect(recorded).toHaveLength(1);
+  const attributes = recorded[0]?.attributes as Record<string, string | number>;
+  expect(Object.keys(attributes).every((key) => (OTLP_SPAN_ATTRIBUTE_KEYS as readonly string[]).includes(key))).toBe(true);
+  expect(attributes).toMatchObject({
+    "space.activity_type": "runCodexAppServerTurn",
+    "space.outcome": "FAILED",
+    "space.reason_code": "TOOL_UNAVAILABLE",
+    "space.category": "TOOL_UNAVAILABLE",
+    "space.room_id": "room:alpha01",
+    "space.pane_id": "pane:alpha01",
+    "space.mission_id": "mission:1"
+  });
+  const exported = JSON.stringify(recorded, (_key, value) => typeof value === "bigint" ? value.toString() : value);
+  expect(exported).not.toContain("PRIVATE PROMPT");
+  expect(exported).not.toContain("sk-live-activity");
+  expect(exported).not.toContain("/home/operator");
+  expect(exported).not.toContain("https://");
 });

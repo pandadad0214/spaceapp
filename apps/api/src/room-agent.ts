@@ -187,6 +187,9 @@ export class TemporalRoomAgentWorkflowCoordinator implements RoomAgentWorkflowCo
   }
 
   async enqueueAction(actionId: string, bridge: SpaceAgentRoomActionBridgeRequest, traceId: string): Promise<void> {
+    // Read the request span before the Temporal connect await. A later lookup can
+    // miss it once the bounded registry evicts the request.
+    const traceparent = traceparentForTraceId(traceId);
     const lease = await this.connect("roomAgentActionWorkflow");
     try {
       try {
@@ -197,7 +200,7 @@ export class TemporalRoomAgentWorkflowCoordinator implements RoomAgentWorkflowCo
           // traceId is this internal request; bridge.requestId is the originating request.
           memo: workflowCorrelationMemo({
             traceId,
-            traceparent: traceparentForTraceId(traceId),
+            traceparent,
             parentTraceId: bridge.requestId ?? null,
             missionId: bridge.missionId
           })

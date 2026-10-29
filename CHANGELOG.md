@@ -5,6 +5,8 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+- With `SPACE_OTEL_EXPORTER_OTLP_ENDPOINT` set, an API request that starts Temporal work exports one trace: the API span, the workflow span, every activity attempt, and nested child workflows. Continue-as-new and background continuations (`trace:bg-<id>`) link to the run or trace they continue. Nothing is exported when the endpoint is unset.
+
 ## [1.1.9] - 2026-10-25
 
 Source: sanitized Space app @ 25bcec3e77 (5029 files). 1.1.8 was prepared but never published; its changes are part of
