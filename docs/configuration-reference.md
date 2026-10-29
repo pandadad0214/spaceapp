@@ -52,3 +52,19 @@ background work, and is hidden in the web app. Public installs upgraded from
 1.1.x that used Job Copilot, the games, channels, Telegram or the desktop
 routes set the modules they keep, for example
 `SPACE_OPTIONAL_MODULES=job-copilot,games`.
+
+## Trace export
+
+`SPACE_OTEL_EXPORTER_OTLP_ENDPOINT` is optional and unset by default. When it
+is a plain `http` or `https` base URL with no user, password, query or hash,
+the API and all three Temporal workers (`space-worker`,
+`space-memory-maintenance-worker`, `space-memory-mutation-worker`) POST OTLP/HTTP
+JSON spans to `<endpoint>/v1/traces`. The queue holds at most 4096 spans, each
+POST times out after 3 seconds, and a collector that is slow or down does not
+fail a request, workflow or activity. Leave it unset to export nothing: workers
+then do not load the workflow tracing interceptor.
+
+There is no separate sampling switch and no OpenTelemetry SDK. The attribute
+allowlist, the workflow/activity span tree and continuation links are described
+in [observability.md](quality/observability.md). A Jaeger all-in-one listening
+on `127.0.0.1:4318` is a suitable local collector.

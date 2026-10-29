@@ -173,6 +173,17 @@ describe("durable background continuation", () => {
     expect(final?.status).toBe("COMPLETED");
   });
 
+  it("keeps the source traceparent on a trace:bg continuation", async () => {
+    const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    const c = continuationFixture("OPEN_TYPES", traceparent);
+    const prepared = await prepareBackgroundContinuation(c.input, c.store);
+    if (prepared.state !== "READY") throw new Error("Missing continuation");
+    expect(prepared.item.turn.traceId).toMatch(/^trace:bg-/);
+    expect(prepared.item.turn.traceparent).toBe(traceparent);
+    expect(prepared.item.turn.roomAgentContinuation).toEqual({ sourceRunId: c.initial.run.runId, generation: 1 });
+    expect(prepared.item.turn.prompt).not.toBe(traceparent);
+  });
+
   it("guards completion against stop committed between read and write", async () => {
     const c = continuationFixture();
     const original = c.store.updateRoomAgentMission.bind(c.store);

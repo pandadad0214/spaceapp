@@ -11,6 +11,12 @@
  * request.
  */
 
+export interface OtlpSpanLink {
+  traceId: string;
+  spanId: string;
+  attributes?: Readonly<Record<string, string | number>>;
+}
+
 export interface ServerSpan {
   traceId: string;
   spanId: string;
@@ -22,6 +28,8 @@ export interface ServerSpan {
   error: boolean;
   /** OTLP span kind; SERVER (2) unless given. Worker activities use INTERNAL (1). */
   kind?: number;
+  /** Continue-as-new and background continuations point at the span they continue. */
+  links?: readonly OtlpSpanLink[];
 }
 
 export interface SpanExporterStats {
@@ -70,6 +78,16 @@ function attributeValue(value: string | number) {
   return typeof value === "number" && Number.isInteger(value) ? { intValue: String(value) } : { stringValue: String(value) };
 }
 
+function spanLinks(span: ServerSpan) {
+  const links = (span.links ?? []).flatMap((link) => {
+    if (!traceIdPattern.test(link.traceId) || /^0+$/.test(link.traceId)) return [];
+    if (!spanIdPattern.test(link.spanId) || /^0+$/.test(link.spanId)) return [];
+    const attributes = Object.entries(link.attributes ?? {}).map(([key, value]) => ({ key, value: attributeValue(value) }));
+    return [{ traceId: link.traceId, spanId: link.spanId, ...(attributes.length ? { attributes } : {}) }];
+  });
+  return links.length ? { links } : {};
+}
+
 export function otlpTraceRequest(spans: readonly ServerSpan[], serviceName: string) {
   return {
     resourceSpans: [{
@@ -85,6 +103,7 @@ export function otlpTraceRequest(spans: readonly ServerSpan[], serviceName: stri
           startTimeUnixNano: span.startTimeUnixNano.toString(),
           endTimeUnixNano: span.endTimeUnixNano.toString(),
           attributes: Object.entries(span.attributes).map(([key, value]) => ({ key, value: attributeValue(value) })),
+          ...spanLinks(span),
           // STATUS_CODE_ERROR or STATUS_CODE_UNSET
           status: { code: span.error ? 2 : 0 }
         }))
@@ -121,16 +140,22 @@ export function createOtlpSpanExporter(options: OtlpSpanExporterOptions): SpanEx
     }
   };
   const flush = (): Promise<void> => {
-    if (!inFlight) {
-      inFlight = (async () => {
-        try {
-          while (queue.length) await flushOnce();
-        } finally {
-          inFlight = null;
-        }
-      })();
-    }
-    return inFlight;
+    if (inFlight) return inFlight;
+    // Assign the in-flight promise before draining. An empty queue finishes
+    // synchronously; if the drain cleared `inFlight` before this assignment,
+    // the resolved promise would stick and every later batch would be skipped.
+    let release: () => void = () => undefined;
+    const done = new Promise<void>((resolve) => { release = resolve; });
+    inFlight = done;
+    void (async () => {
+      try {
+        while (queue.length) await flushOnce();
+      } finally {
+        if (inFlight === done) inFlight = null;
+        release();
+      }
+    })();
+    return done;
   };
   const timer = setInterval(() => void flush(), options.flushIntervalMs ?? 5000);
   timer.unref?.();

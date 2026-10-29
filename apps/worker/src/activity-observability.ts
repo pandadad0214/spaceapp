@@ -11,6 +11,8 @@ import {
   type FailureCategory
 } from "@space/contracts";
 import type { SpanExporter } from "@space/runtime";
+import { allowlistSpanAttributes } from "./otlp-attributes.js";
+import { TRACE_PARENT_HEADER, decodeHeader, parseTraceContext } from "./workflow-trace-protocol.js";
 import { logIdentifier, workerLog, type WorkerLogValue } from "./worker-log.js";
 import { workerMetrics, type WorkerMetrics } from "./worker-metrics.js";
 
@@ -135,8 +137,10 @@ export interface ObserveActivityDependencies {
   metrics?: WorkerMetrics;
   now?: () => number;
   cancelled?: () => boolean;
-  /** OTLP export (SPACE_OTEL_EXPORTER_OTLP_ENDPOINT): one span per activity whose input carries a traceparent. */
+  /** OTLP export (SPACE_OTEL_EXPORTER_OTLP_ENDPOINT): one span per activity attempt. */
   spans?: SpanExporter | null;
+  /** Workflow span traceparent injected by the workflow interceptor. Wins over the activity arguments. */
+  parentTraceparent?: string;
 }
 
 function activityTraceparent(args: readonly unknown[]) {
@@ -194,16 +198,33 @@ export async function observeActivityExecution<T>(
       queueMs,
       rssBytes: process.memoryUsage().rss
     });
-    const parent = dependencies.spans ? activityTraceparent(args) : null;
-    if (parent) {
-      dependencies.spans!.record({
-        traceId: parent.traceId,
-        spanId: randomBytes(8).toString("hex"),
-        parentSpanId: parent.parentId,
+    const headerParent = parseTraceContext(dependencies.parentTraceparent);
+    const argumentParent = activityTraceparent(args);
+    if (dependencies.spans && (headerParent || argumentParent)) {
+      const correlation = activityCorrelation(args);
+      let spanId = randomBytes(8).toString("hex");
+      while (/^0+$/.test(spanId)) spanId = randomBytes(8).toString("hex");
+      dependencies.spans.record({
+        traceId: headerParent?.traceId ?? argumentParent!.traceId,
+        spanId,
+        parentSpanId: headerParent?.spanId ?? argumentParent!.parentId,
         name: `activity ${activityType}`,
         startTimeUnixNano: BigInt(startedAt) * 1_000_000n,
         endTimeUnixNano: BigInt(startedAt + durationMs) * 1_000_000n,
-        attributes: { "space.activity_type": activityType, "space.outcome": outcome, "space.attempt": info.attempt },
+        attributes: allowlistSpanAttributes({
+          "space.activity_type": activityType,
+          "space.outcome": outcome,
+          "space.attempt": info.attempt,
+          "space.duration_ms": durationMs,
+          "space.workflow_type": logIdentifier(info.workflowType) ?? undefined,
+          "space.workflow_id": logIdentifier(info.workflowExecution?.workflowId) ?? undefined,
+          "space.run_id": logIdentifier(info.workflowExecution?.runId) ?? undefined,
+          "space.reason_code": reasonCode ?? undefined,
+          "space.category": category ?? undefined,
+          "space.room_id": correlation.roomId,
+          "space.pane_id": correlation.paneId,
+          "space.mission_id": correlation.missionId
+        }),
         error: outcome === "FAILED" || outcome === "FAILED_RESULT",
         kind: 1
       });
@@ -227,10 +248,14 @@ export async function observeActivityExecution<T>(
 export function createActivityObservabilityInterceptors(dependencies: Omit<ObserveActivityDependencies, "cancelled"> = {}): ActivityInterceptorsFactory {
   return (context) => ({
     inbound: {
-      execute: (input, next) => observeActivityExecution(context.info, input.args, () => next(input), {
-        ...dependencies,
-        cancelled: () => context.cancellationSignal.aborted
-      })
+      execute: (input, next) => {
+        const parent = decodeHeader(input.headers?.[TRACE_PARENT_HEADER]);
+        return observeActivityExecution(context.info, input.args, () => next(input), {
+          ...dependencies,
+          ...(parent ? { parentTraceparent: parent } : {}),
+          cancelled: () => context.cancellationSignal.aborted
+        });
+      }
     }
   });
 }

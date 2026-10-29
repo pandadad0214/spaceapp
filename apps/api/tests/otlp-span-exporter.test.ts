@@ -120,6 +120,36 @@ describe("OTLP span exporter", () => {
     expect(unreachable.stats()).toEqual({ exported: 0, dropped: 0, failed: 1 });
   });
 
+  it("keeps exporting after a flush that finds an empty queue", async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true }));
+    const created = exporter(fetchImpl);
+    await created.flush();
+    await created.flush();
+    created.record(span());
+    await created.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(created.stats()).toEqual({ exported: 1, dropped: 0, failed: 0 });
+  });
+
+  it("exports valid span links and drops links whose ids are not W3C ids", async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true }));
+    const created = exporter(fetchImpl);
+    created.record(span({
+      links: [
+        { traceId, spanId: parentId, attributes: { "space.link_type": "continue_as_new" } },
+        { traceId: "not-a-trace", spanId: parentId },
+        { traceId, spanId: "0000000000000000" }
+      ]
+    }));
+    await created.flush();
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1].body);
+    expect(body.resourceSpans[0].scopeSpans[0].spans[0].links).toEqual([{
+      traceId,
+      spanId: parentId,
+      attributes: [{ key: "space.link_type", value: { stringValue: "continue_as_new" } }]
+    }]);
+  });
+
   it("ignores spans whose ids are not W3C trace and span ids", async () => {
     const fetchImpl = vi.fn(async () => ({ ok: true }));
     const created = exporter(fetchImpl);
